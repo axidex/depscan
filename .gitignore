@@ -1,1 +1,15 @@
 .idea
+
+# Binaries
+/depscan
+/bin/
+/dist/
+
+# Test & coverage artifacts
+*.out
+coverage.*
+results.sarif
+results.json
+
+# OS noise
+.DS_Store
