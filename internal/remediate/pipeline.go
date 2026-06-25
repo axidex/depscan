@@ -11,23 +11,34 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"github.com/axidex/depscan/internal/versioning"
+	"github.com/axidex/craftnovate/internal/versioning"
+)
+
+// Update types, classifying an upgrade relative to the current version (the
+// values versioning.UpdateType returns).
+const (
+	updateMajor = "major"
+	updateMinor = "minor"
+	updatePatch = "patch"
 )
 
 // Upgrade is a declared dependency together with the newer version to bump it
-// to. Security marks an upgrade chosen to fix a known vulnerability (Target is
-// then the minimal fixed version), with VulnIDs naming the advisories.
+// to. UpdateType classifies the bump ("major"/"minor"/"patch") and drives
+// major/minor separation and grouping. Security marks an upgrade chosen to fix a
+// known vulnerability (Target is then the minimal fixed version), with VulnIDs
+// naming the advisories.
 type Upgrade struct {
-	Dep      DeclaredDependency
-	Target   string
-	Security bool
-	VulnIDs  []string
+	Dep        DeclaredDependency
+	Target     string
+	UpdateType string
+	Security   bool
+	VulnIDs    []string
 }
 
 // VersionLister returns the versions a registry publishes for a coordinate
 // (implemented by internal/datasource.Maven and .MavenMetadata).
 //
-//go:generate mockgen -destination mock_versionlister_test.go -package remediate github.com/axidex/depscan/internal/remediate VersionLister
+//go:generate mockgen -destination mock_versionlister_test.go -package remediate github.com/axidex/craftnovate/internal/remediate VersionLister
 type VersionLister interface {
 	Versions(ctx context.Context, group, artifact string) ([]string, error)
 }
@@ -63,7 +74,12 @@ func datasourceOf(d DeclaredDependency) string {
 // occurrence that has a newer stable version. Coordinates whose datasource has
 // no registered lister, or whose lookup fails, are collected as errors, not
 // fatal.
-func PlanUpgrades(ctx context.Context, declared []DeclaredDependency, datasources map[string]VersionLister, sel Selector, concurrency int) ([]Upgrade, []error) {
+//
+// When separateMajorMinor is set, each occurrence may yield two upgrades — the
+// newest non-major (minor/patch) bump and the newest major bump — so they can be
+// reviewed in separate pull requests (Renovate's default). Otherwise it yields a
+// single upgrade to the newest permitted version.
+func PlanUpgrades(ctx context.Context, declared []DeclaredDependency, datasources map[string]VersionLister, sel Selector, concurrency int, separateMajorMinor bool) ([]Upgrade, []error) {
 	if sel == nil {
 		sel = DefaultSelector{}
 	}
@@ -113,20 +129,104 @@ func PlanUpgrades(ctx context.Context, declared []DeclaredDependency, datasource
 	var ups []Upgrade
 	for _, d := range declared {
 		vsn := versioning.Get(datasourceOf(d))
-		chosen, ok := sel.Select(vsn, d.Coordinate(), d.Version, versionsByCoord[coordKey{datasourceOf(d), d.Group, d.Artifact}])
-		if !ok {
-			continue
+		cands := versionsByCoord[coordKey{datasourceOf(d), d.Group, d.Artifact}]
+		for _, base := range chooseTargets(vsn, sel, d, cands, separateMajorMinor) {
+			ups = append(ups, Upgrade{
+				Dep:        d,
+				Target:     vsn.NewValue(d.Version, base), // preserve range shape (npm ^/~)
+				UpdateType: vsn.UpdateType(d.Version, base),
+			})
 		}
-		// Render the manifest value to write, preserving range shape (npm ^/~).
-		ups = append(ups, Upgrade{Dep: d, Target: vsn.NewValue(d.Version, chosen)})
 	}
 	sort.Slice(ups, func(i, j int) bool {
-		if ups[i].Dep.Coordinate() != ups[j].Dep.Coordinate() {
-			return ups[i].Dep.Coordinate() < ups[j].Dep.Coordinate()
+		a, b := ups[i], ups[j]
+		if a.Dep.Coordinate() != b.Dep.Coordinate() {
+			return a.Dep.Coordinate() < b.Dep.Coordinate()
 		}
-		return ups[i].Dep.File < ups[j].Dep.File
+		if ra, rb := majorRank(a.UpdateType), majorRank(b.UpdateType); ra != rb {
+			return ra < rb // non-major before major
+		}
+		if a.Dep.File != b.Dep.File {
+			return a.Dep.File < b.Dep.File
+		}
+		return a.Dep.Line < b.Dep.Line
 	})
 	return ups, errs
+}
+
+// chooseTargets returns the base version(s) to upgrade d to. With
+// separateMajorMinor it picks the newest permitted non-major bump and the newest
+// permitted major bump independently (each becomes its own pull request);
+// otherwise it picks the single newest permitted version.
+func chooseTargets(v versioning.Versioning, sel Selector, d DeclaredDependency, candidates []string, separateMajorMinor bool) []string {
+	coord := d.Coordinate()
+	if !separateMajorMinor {
+		if t, ok := sel.Select(v, coord, d.Version, candidates); ok {
+			return []string{t}
+		}
+		return nil
+	}
+	nonMajor, major := bucketCandidates(v, d.Version, candidates)
+	var out []string
+	if t, ok := sel.Select(v, coord, d.Version, nonMajor); ok {
+		out = append(out, t)
+	}
+	if t, ok := sel.Select(v, coord, d.Version, major); ok {
+		out = append(out, t)
+	}
+	return out
+}
+
+// bucketCandidates splits candidates into non-major (minor/patch) and major
+// upgrades relative to current; non-upgrades are dropped.
+func bucketCandidates(v versioning.Versioning, current string, candidates []string) (nonMajor, major []string) {
+	for _, c := range candidates {
+		switch v.UpdateType(current, c) {
+		case updateMajor:
+			major = append(major, c)
+		case updateMinor, updatePatch:
+			nonMajor = append(nonMajor, c)
+		}
+	}
+	return nonMajor, major
+}
+
+func majorRank(updateType string) int {
+	if updateType == updateMajor {
+		return 1
+	}
+	return 0
+}
+
+// DedupeBySite keeps a single upgrade per edit site — the newest target — so the
+// in-place --write path never rewrites one location twice (separateMajorMinor
+// can produce a non-major and a major upgrade for the same site). Pull requests
+// don't need this: each branch applies only its own group's edits.
+func DedupeBySite(ups []Upgrade) []Upgrade {
+	type siteKey struct {
+		file string
+		line int
+		col  int
+	}
+	best := map[siteKey]Upgrade{}
+	var order []siteKey
+	for _, u := range ups {
+		k := siteKey{u.Dep.File, u.Dep.Line, u.Dep.Col}
+		cur, ok := best[k]
+		if !ok {
+			best[k] = u
+			order = append(order, k)
+			continue
+		}
+		if versioning.Get(datasourceOf(u.Dep)).Compare(u.Target, cur.Target) > 0 {
+			best[k] = u
+		}
+	}
+	out := make([]Upgrade, 0, len(order))
+	for _, k := range order {
+		out = append(out, best[k])
+	}
+	return out
 }
 
 // ApplyUpgrades rewrites each affected build file in place, replacing the old

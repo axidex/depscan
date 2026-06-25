@@ -1,7 +1,7 @@
 // Package datasource looks up the versions a package registry publishes for a
 // dependency — the "datasource" role. Paired with internal/mavenver it
 // answers "is there a newer stable version to bump to?". Lookups are read-only
-// and never execute a build tool.
+// and never execute a build tool. HTTP is via the resty client.
 package datasource
 
 import (
@@ -9,11 +9,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
 	"time"
+
+	"resty.dev/v3"
 )
 
 // ErrNotFound means the registry has no record of the package.
@@ -25,11 +26,27 @@ const maxResponseBytes = 8 << 20
 // defaultMavenSearchURL is the Maven Central search endpoint.
 const defaultMavenSearchURL = "https://search.maven.org/solrsearch/select"
 
+// newRestyClient builds the resty client shared by the datasources: a request
+// timeout, a buffered-response cap, and a JSON Accept header. When hc is non-nil
+// (tests) it wraps that *http.Client (resty ignores http.Client.Timeout, so the
+// timeout is set explicitly).
+func newRestyClient(hc *http.Client, timeout time.Duration) *resty.Client {
+	rc := resty.New()
+	if hc != nil {
+		rc = resty.NewWithClient(hc)
+	}
+	return rc.
+		SetTimeout(timeout).
+		SetResponseBodyLimit(maxResponseBytes).
+		SetHeader("Accept", "application/json")
+}
+
 // Maven resolves published versions from Maven Central.
 type Maven struct {
-	client    *http.Client
-	searchURL string
-	rows      int
+	client     *resty.Client
+	httpClient *http.Client
+	searchURL  string
+	rows       int
 }
 
 // Option configures a Maven datasource.
@@ -39,7 +56,7 @@ type Option func(*Maven)
 func WithHTTPClient(c *http.Client) Option {
 	return func(m *Maven) {
 		if c != nil {
-			m.client = c
+			m.httpClient = c
 		}
 	}
 }
@@ -55,14 +72,11 @@ func WithSearchURL(u string) Option {
 
 // NewMaven builds a Maven datasource with sensible defaults.
 func NewMaven(opts ...Option) *Maven {
-	m := &Maven{
-		client:    &http.Client{Timeout: 20 * time.Second},
-		searchURL: defaultMavenSearchURL,
-		rows:      200,
-	}
+	m := &Maven{searchURL: defaultMavenSearchURL, rows: 200}
 	for _, opt := range opts {
 		opt(m)
 	}
+	m.client = newRestyClient(m.httpClient, 20*time.Second)
 	return m
 }
 
@@ -91,30 +105,20 @@ func (m *Maven) Versions(ctx context.Context, group, artifact string) ([]string,
 		"wt":   {"json"},
 		"sort": {"timestamp desc"},
 	}
-	endpoint := m.searchURL + "?" + q.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, fmt.Errorf("datasource: maven: build request: %w", err)
-	}
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := m.client.Do(req)
+	res, err := m.client.R().
+		SetContext(ctx).
+		SetQueryParamsFromValues(q).
+		Get(m.searchURL)
 	if err != nil {
 		return nil, fmt.Errorf("datasource: maven: %s:%s: %w", group, artifact, err)
 	}
-	defer resp.Body.Close()
-
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
-	if err != nil {
-		return nil, fmt.Errorf("datasource: maven: read response: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("datasource: maven: %s:%s: status %d", group, artifact, resp.StatusCode)
+	if res.StatusCode() != http.StatusOK {
+		return nil, fmt.Errorf("datasource: maven: %s:%s: status %d", group, artifact, res.StatusCode())
 	}
 
 	var payload mavenSearchResponse
-	if err := json.Unmarshal(data, &payload); err != nil {
+	if err := json.Unmarshal(res.Bytes(), &payload); err != nil {
 		return nil, fmt.Errorf("datasource: maven: decode: %w", err)
 	}
 	// Maven Central returns HTTP 200 with numFound:0 for a missing package.

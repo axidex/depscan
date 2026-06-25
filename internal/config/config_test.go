@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/axidex/depscan/internal/versioning"
+	"github.com/axidex/craftnovate/internal/versioning"
 )
 
 // maven is the versioning used across config tests (Maven semantics).
@@ -18,12 +18,13 @@ func TestLoadAndMerge(t *testing.T) {
 	cfgJSON := `{
 		"ignoreUnstable": false,
 		"ignoreDeps": ["com.example:legacy"],
+		"groupStrategy": "ecosystem",
 		"packageRules": [
 			{"matchUpdateTypes": ["major"], "enabled": false},
 			{"matchPackagePrefixes": ["org.junit"], "allowedVersions": "<5.13"}
 		]
 	}`
-	if err := os.WriteFile(filepath.Join(root, "depscan.json"), []byte(cfgJSON), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "craftnovate.json"), []byte(cfgJSON), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -40,6 +41,9 @@ func TestLoadAndMerge(t *testing.T) {
 	}
 	if len(cfg.PackageRules) != 2 {
 		t.Fatalf("got %d rules, want 2", len(cfg.PackageRules))
+	}
+	if cfg.GroupStrategy != "ecosystem" {
+		t.Errorf("groupStrategy = %q, want ecosystem", cfg.GroupStrategy)
 	}
 }
 

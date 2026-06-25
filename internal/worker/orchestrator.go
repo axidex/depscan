@@ -4,8 +4,8 @@ import (
 	"context"
 	"strings"
 
-	"github.com/axidex/depscan/internal/remediate"
-	"github.com/axidex/depscan/internal/sourcecraft"
+	"github.com/axidex/craftnovate/internal/remediate"
+	"github.com/axidex/craftnovate/internal/sourcecraft"
 )
 
 // Action is the outcome of processing one PR group.
@@ -30,7 +30,7 @@ type PRResult struct {
 // Platform is the subset of the Sourcecraft client the orchestrator needs (a
 // small interface so it can be mocked in tests).
 //
-//go:generate mockgen -destination mock_platform_test.go -package worker github.com/axidex/depscan/internal/worker Platform
+//go:generate mockgen -destination mock_platform_test.go -package worker github.com/axidex/craftnovate/internal/worker Platform
 type Platform interface {
 	ListMyPulls(ctx context.Context) ([]sourcecraft.PullRequest, error)
 	CreatePullRequest(ctx context.Context, repoID string, body sourcecraft.CreatePullRequestBody) (*sourcecraft.PullRequest, error)
@@ -70,7 +70,7 @@ func OpenPRs(ctx context.Context, git *Git, plat Platform, repoID, base, remote 
 	return results
 }
 
-// openState fetches the caller's open depscan PRs once: the set of open
+// openState fetches the caller's open craftnovate PRs once: the set of open
 // source branches and how many of our branches are open (for the limit).
 func openState(ctx context.Context, plat Platform) (byBranch map[string]bool, count int, err error) {
 	pulls, err := plat.ListMyPulls(ctx)

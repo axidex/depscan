@@ -3,7 +3,7 @@
 // targets for Maven, PyPI, and future ecosystems without hard-coding a scheme.
 package versioning
 
-import "github.com/axidex/depscan/internal/mavenver"
+import "github.com/axidex/craftnovate/internal/mavenver"
 
 // Versioning is the comparison/selection surface a single ecosystem provides.
 type Versioning interface {

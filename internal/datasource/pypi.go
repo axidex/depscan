@@ -5,11 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+
+	"resty.dev/v3"
 )
 
 // defaultPyPIBase is the PyPI JSON API root.
@@ -17,8 +18,9 @@ const defaultPyPIBase = "https://pypi.org/pypi"
 
 // PyPI lists published versions from the PyPI JSON API.
 type PyPI struct {
-	client  *http.Client
-	baseURL string
+	client     *resty.Client
+	httpClient *http.Client
+	baseURL    string
 }
 
 // PyPIOption configures a PyPI datasource.
@@ -28,7 +30,7 @@ type PyPIOption func(*PyPI)
 func WithPyPIHTTPClient(c *http.Client) PyPIOption {
 	return func(p *PyPI) {
 		if c != nil {
-			p.client = c
+			p.httpClient = c
 		}
 	}
 }
@@ -44,10 +46,11 @@ func WithPyPIBaseURL(u string) PyPIOption {
 
 // NewPyPI builds a PyPI datasource.
 func NewPyPI(opts ...PyPIOption) *PyPI {
-	p := &PyPI{client: &http.Client{Timeout: 20 * time.Second}, baseURL: defaultPyPIBase}
+	p := &PyPI{baseURL: defaultPyPIBase}
 	for _, opt := range opts {
 		opt(p)
 	}
+	p.client = newRestyClient(p.httpClient, 20*time.Second)
 	return p
 }
 
@@ -60,32 +63,21 @@ func (p *PyPI) Versions(ctx context.Context, group, artifact string) ([]string, 
 	}
 	endpoint := p.baseURL + "/" + url.PathEscape(artifact) + "/json"
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, fmt.Errorf("datasource: pypi: build request: %w", err)
-	}
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := p.client.Do(req)
+	res, err := p.client.R().SetContext(ctx).Get(endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("datasource: pypi: %s: %w", artifact, err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
+	if res.StatusCode() == http.StatusNotFound {
 		return nil, ErrNotFound
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
-	if err != nil {
-		return nil, fmt.Errorf("datasource: pypi: read response: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("datasource: pypi: %s: status %d", artifact, resp.StatusCode)
+	if res.StatusCode() != http.StatusOK {
+		return nil, fmt.Errorf("datasource: pypi: %s: status %d", artifact, res.StatusCode())
 	}
 
 	var payload struct {
 		Releases map[string]json.RawMessage `json:"releases"`
 	}
-	if err := json.Unmarshal(data, &payload); err != nil {
+	if err := json.Unmarshal(res.Bytes(), &payload); err != nil {
 		return nil, fmt.Errorf("datasource: pypi: decode: %w", err)
 	}
 	if len(payload.Releases) == 0 {

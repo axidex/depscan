@@ -1,15 +1,15 @@
 version: 2
 
-project_name: depscan
+project_name: craftnovate
 
 before:
   hooks:
     - go mod tidy
 
 builds:
-  - id: depscan
-    main: ./cmd/depscan
-    binary: depscan
+  - id: craftnovate
+    main: ./cmd/craftnovate
+    binary: craftnovate
     env:
       - CGO_ENABLED=0 # fully static binary, no libc dependency
     flags:
@@ -27,7 +27,7 @@ builds:
     mod_timestamp: "{{ .CommitTimestamp }}" # deterministic timestamps
 
 archives:
-  - id: depscan
+  - id: craftnovate
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     formats:
       - tar.gz

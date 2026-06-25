@@ -1,0 +1,12 @@
+# Keep the build context small; the image needs only go.mod/go.sum + source.
+.git
+.github
+.agents
+docs
+dist
+bin
+*.out
+coverage.out
+.sc.swagger.json
+Dockerfile
+.dockerignore

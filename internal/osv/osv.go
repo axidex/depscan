@@ -5,11 +5,9 @@
 package osv
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"regexp"
 	"strings"
@@ -17,6 +15,7 @@ import (
 	"time"
 
 	"golang.org/x/sync/errgroup"
+	"resty.dev/v3"
 )
 
 const (
@@ -62,7 +61,8 @@ type Advisory struct {
 
 // Client talks to OSV.dev.
 type Client struct {
-	http        *http.Client
+	rest        *resty.Client
+	httpClient  *http.Client
 	batchURL    string
 	vulnURL     string
 	concurrency int
@@ -78,7 +78,7 @@ type Option func(*Client)
 func WithHTTPClient(h *http.Client) Option {
 	return func(c *Client) {
 		if h != nil {
-			c.http = h
+			c.httpClient = h
 		}
 	}
 }
@@ -92,7 +92,6 @@ func WithEndpoints(batchURL, vulnBase string) Option {
 // New builds an OSV client.
 func New(opts ...Option) *Client {
 	c := &Client{
-		http:        &http.Client{Timeout: 30 * time.Second},
 		batchURL:    defaultBatchURL,
 		vulnURL:     defaultVulnURL,
 		concurrency: 8,
@@ -101,6 +100,14 @@ func New(opts ...Option) *Client {
 	for _, opt := range opts {
 		opt(c)
 	}
+	rc := resty.New()
+	if c.httpClient != nil {
+		rc = resty.NewWithClient(c.httpClient)
+	}
+	c.rest = rc.
+		SetTimeout(30*time.Second).
+		SetResponseBodyLimit(maxResponse).
+		SetHeader("Accept", "application/json")
 	return c
 }
 
@@ -274,25 +281,15 @@ func (c *Client) doJSON(ctx context.Context, method, url string, body, out any) 
 }
 
 func (c *Client) do(ctx context.Context, method, url string, body []byte) (int, []byte, error) {
-	var reader io.Reader
+	req := c.rest.R().SetContext(ctx)
 	if body != nil {
-		reader = bytes.NewReader(body)
+		req.SetHeader("Content-Type", "application/json").SetBody(body)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, url, reader)
+	res, err := req.Execute(method, url)
 	if err != nil {
 		return 0, nil, err
 	}
-	req.Header.Set("Accept", "application/json")
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return 0, nil, err
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse))
-	return resp.StatusCode, data, err
+	return res.StatusCode(), res.Bytes(), nil
 }
 
 // fixedVersionsFor extracts fixed versions from the affected entries that match
