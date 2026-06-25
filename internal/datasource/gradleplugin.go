@@ -5,10 +5,11 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
+
+	"resty.dev/v3"
 )
 
 // defaultGradlePluginBase is the Gradle Plugin Portal's Maven repository.
@@ -18,8 +19,9 @@ const defaultGradlePluginBase = "https://plugins.gradle.org/m2"
 // It backs the Gradle Plugin Portal datasource, where a plugin id "com.x" is
 // resolved through its marker artifact "com.x:com.x.gradle.plugin".
 type MavenMetadata struct {
-	client  *http.Client
-	baseURL string
+	client     *resty.Client
+	httpClient *http.Client
+	baseURL    string
 }
 
 // MetaOption configures a MavenMetadata datasource.
@@ -29,7 +31,7 @@ type MetaOption func(*MavenMetadata)
 func WithMetaHTTPClient(c *http.Client) MetaOption {
 	return func(m *MavenMetadata) {
 		if c != nil {
-			m.client = c
+			m.httpClient = c
 		}
 	}
 }
@@ -45,13 +47,11 @@ func WithMetaBaseURL(u string) MetaOption {
 
 // NewGradlePlugin builds a datasource for the Gradle Plugin Portal.
 func NewGradlePlugin(opts ...MetaOption) *MavenMetadata {
-	m := &MavenMetadata{
-		client:  &http.Client{Timeout: 20 * time.Second},
-		baseURL: defaultGradlePluginBase,
-	}
+	m := &MavenMetadata{baseURL: defaultGradlePluginBase}
 	for _, opt := range opts {
 		opt(m)
 	}
+	m.client = newRestyClient(m.httpClient, 20*time.Second)
 	return m
 }
 
@@ -72,29 +72,19 @@ func (m *MavenMetadata) Versions(ctx context.Context, group, artifact string) ([
 	}
 	endpoint := m.baseURL + "/" + strings.ReplaceAll(group, ".", "/") + "/" + artifact + "/maven-metadata.xml"
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, fmt.Errorf("datasource: maven-metadata: build request: %w", err)
-	}
-	resp, err := m.client.Do(req)
+	res, err := m.client.R().SetContext(ctx).Get(endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("datasource: maven-metadata: %s:%s: %w", group, artifact, err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNotFound {
+	if res.StatusCode() == http.StatusNotFound {
 		return nil, ErrNotFound
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
-	if err != nil {
-		return nil, fmt.Errorf("datasource: maven-metadata: read response: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("datasource: maven-metadata: %s:%s: status %d", group, artifact, resp.StatusCode)
+	if res.StatusCode() != http.StatusOK {
+		return nil, fmt.Errorf("datasource: maven-metadata: %s:%s: status %d", group, artifact, res.StatusCode())
 	}
 
 	var meta mavenMetadataXML
-	if err := xml.Unmarshal(data, &meta); err != nil {
+	if err := xml.Unmarshal(res.Bytes(), &meta); err != nil {
 		return nil, fmt.Errorf("datasource: maven-metadata: decode: %w", err)
 	}
 	if len(meta.Versioning.Versions.Version) == 0 {

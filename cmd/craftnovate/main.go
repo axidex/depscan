@@ -1,4 +1,4 @@
-// Command depscan is a permissive, automated dependency-update
+// Command craftnovate is a permissive, automated dependency-update
 // tool for the Sourcecraft platform. It scans a Gradle project's build files for
 // declared dependencies, finds newer stable versions on Maven Central, groups
 // the upgrades into pull requests, and — with --create-prs — pushes a branch per
@@ -11,17 +11,18 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
-	"github.com/axidex/depscan/internal/config"
-	"github.com/axidex/depscan/internal/datasource"
-	"github.com/axidex/depscan/internal/osv"
-	"github.com/axidex/depscan/internal/remediate"
-	"github.com/axidex/depscan/internal/sourcecraft"
-	"github.com/axidex/depscan/internal/versioning"
-	"github.com/axidex/depscan/internal/worker"
+	"github.com/axidex/craftnovate/internal/config"
+	"github.com/axidex/craftnovate/internal/datasource"
+	"github.com/axidex/craftnovate/internal/osv"
+	"github.com/axidex/craftnovate/internal/remediate"
+	"github.com/axidex/craftnovate/internal/sourcecraft"
+	"github.com/axidex/craftnovate/internal/versioning"
+	"github.com/axidex/craftnovate/internal/worker"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=...".
@@ -36,18 +37,19 @@ const (
 )
 
 type options struct {
-	repo        string
-	write       bool
-	createPRs   bool
-	concurrency int
-	timeout     time.Duration
-	verbose     bool
-	base        string
-	remote      string
-	org         string
-	repoSlug    string
-	apiURL      string
-	noSecurity  bool
+	repo          string
+	write         bool
+	createPRs     bool
+	concurrency   int
+	timeout       time.Duration
+	verbose       bool
+	base          string
+	remote        string
+	org           string
+	repoSlug      string
+	apiURL        string
+	noSecurity    bool
+	groupStrategy string
 }
 
 func main() {
@@ -60,9 +62,9 @@ func newRootCmd() *cobra.Command {
 	var o options
 
 	cmd := &cobra.Command{
-		Use:   "depscan",
+		Use:   "craftnovate",
 		Short: "Automated dependency-update PRs for Sourcecraft",
-		Long: "depscan scans a Gradle project for declared dependencies, finds newer\n" +
+		Long: "craftnovate scans a Gradle project for declared dependencies, finds newer\n" +
 			"stable versions on Maven Central, and reports, applies (--write), or opens\n" +
 			"pull requests (--create-prs) for the available upgrades on Sourcecraft.\n" +
 			"It runs directly on the project (no SBOM) and never executes the build tool.",
@@ -88,8 +90,9 @@ func newRootCmd() *cobra.Command {
 	f.StringVar(&o.repoSlug, "repo-slug", "", "Sourcecraft repo slug (default: parsed from the remote URL)")
 	f.BoolVar(&o.noSecurity, "no-security", false, "skip the OSV vulnerability check (no security-priority targets)")
 	f.StringVar(&o.apiURL, "api-url", "", "Sourcecraft REST API base URL (default https://api.sourcecraft.tech)")
+	f.StringVar(&o.groupStrategy, "group-strategy", "", "PR grouping: monorepo|per-dependency|ecosystem|all (default monorepo)")
 
-	cmd.SetVersionTemplate("depscan {{.Version}}\n")
+	cmd.SetVersionTemplate("craftnovate {{.Version}}\n")
 	return cmd
 }
 
@@ -105,7 +108,13 @@ func run(o options) error {
 		fmt.Fprintf(os.Stderr, "using config %s\n", path)
 	}
 
-	ups, declaredCount, errs, err := planAll(ctx, o, cfg)
+	stratName := o.groupStrategy
+	if stratName == "" {
+		stratName = cfg.GroupStrategy
+	}
+	strategy := worker.ParseStrategy(stratName)
+
+	ups, declaredCount, errs, err := planAll(ctx, o, cfg, strategy.SeparatesMajorMinor())
 	if err != nil {
 		return err
 	}
@@ -124,17 +133,20 @@ func run(o options) error {
 		return nil
 	}
 
-	groups := worker.GroupUpdates(toUpdates(cfg, ups))
+	groups := worker.GroupUpdatesWith(toUpdates(cfg, ups), strategy)
 	printPlan(groups)
 
 	switch {
 	case o.createPRs:
 		return createPRs(ctx, o, groups, cfg.PRConcurrentLimit)
 	case o.write:
-		if err := remediate.ApplyUpgrades(o.repo, ups); err != nil {
+		// One site can carry both a non-major and a major upgrade; --write edits
+		// the working tree once, so collapse to the newest target per site.
+		edits := remediate.DedupeBySite(ups)
+		if err := remediate.ApplyUpgrades(o.repo, edits); err != nil {
 			return err
 		}
-		fmt.Printf("\napplied %d upgrade(s) to %s\n", len(ups), o.repo)
+		fmt.Printf("\napplied %d upgrade(s) to %s\n", len(edits), o.repo)
 		return nil
 	default:
 		fmt.Println("\ndry-run — re-run with --write to edit locally, or --create-prs to open PRs on Sourcecraft")
@@ -145,7 +157,7 @@ func run(o options) error {
 // planAll runs every manager against the repo, plans normal upgrades, then
 // (unless --no-security) overlays OSV vulnerability fixes as security-priority
 // targets. It returns the upgrades, the declared count, and lookup errors.
-func planAll(ctx context.Context, o options, cfg config.Config) (ups []remediate.Upgrade, declaredCount int, errs []error, err error) {
+func planAll(ctx context.Context, o options, cfg config.Config, separateMajorMinor bool) (ups []remediate.Upgrade, declaredCount int, errs []error, err error) {
 	datasources := map[string]remediate.VersionLister{
 		dsMaven:        datasource.NewMaven(),
 		dsGradlePlugin: datasource.NewGradlePlugin(),
@@ -159,14 +171,14 @@ func planAll(ctx context.Context, o options, cfg config.Config) (ups []remediate
 			return nil, 0, nil, mErr
 		}
 		allDeclared = append(allDeclared, declared...)
-		mUps, mErrs := remediate.PlanUpgrades(ctx, declared, datasources, config.NewSelector(cfg, m.Name()), o.concurrency)
+		mUps, mErrs := remediate.PlanUpgrades(ctx, declared, datasources, config.NewSelector(cfg, m.Name()), o.concurrency, separateMajorMinor)
 		ups = append(ups, mUps...)
 		errs = append(errs, mErrs...)
 	}
 
 	if !o.noSecurity {
 		if advisories, vErr := vulnAdvisories(ctx, allDeclared); vErr != nil {
-			fmt.Fprintf(os.Stderr, "depscan: OSV check degraded: %v\n", vErr)
+			fmt.Fprintf(os.Stderr, "craftnovate: OSV check degraded: %v\n", vErr)
 		} else {
 			ups = remediate.PlanSecurity(allDeclared, ups, advisories)
 		}
@@ -226,7 +238,7 @@ func toUpdates(cfg config.Config, ups []remediate.Upgrade) []worker.Update {
 		if u.Security {
 			labels = append(append([]string(nil), labels...), "security")
 		}
-		updates = append(updates, worker.Update{Upgrade: u, GroupName: d.GroupName, Labels: labels})
+		updates = append(updates, worker.Update{Upgrade: u, GroupName: d.GroupName, Manager: manager, Labels: labels})
 	}
 	return updates
 }
@@ -235,10 +247,25 @@ func printPlan(groups []worker.PRGroup) {
 	fmt.Printf("%d pull request(s) planned:\n", len(groups))
 	for _, grp := range groups {
 		fmt.Printf("  %s\n    branch: %s\n", grp.Title, grp.Branch)
+		if len(grp.Labels) > 0 {
+			fmt.Printf("    labels: %s\n", strings.Join(grp.Labels, ", "))
+		}
 		for _, u := range grp.Upgrades {
-			fmt.Printf("      %s:%d  %s -> %s\n", u.Dep.File, u.Dep.Line, u.Dep.Version, u.Target)
+			fmt.Printf("      %s:%d  %s -> %s%s\n", u.Dep.File, u.Dep.Line, u.Dep.Version, u.Target, securityNote(u))
 		}
 	}
+}
+
+// securityNote marks an upgrade chosen to fix a vulnerability, naming the
+// advisories when known.
+func securityNote(u remediate.Upgrade) string {
+	if !u.Security {
+		return ""
+	}
+	if len(u.VulnIDs) > 0 {
+		return "  [security: " + strings.Join(u.VulnIDs, ", ") + "]"
+	}
+	return "  [security]"
 }
 
 func createPRs(ctx context.Context, o options, groups []worker.PRGroup, maxOpen int) error {
@@ -248,14 +275,6 @@ func createPRs(ctx context.Context, o options, groups []worker.PRGroup, maxOpen 
 	}
 
 	git := worker.NewGit(o.repo)
-	base := o.base
-	if base == "" {
-		b, err := git.CurrentBranch(ctx)
-		if err != nil {
-			return err
-		}
-		base = b
-	}
 
 	org, slug := o.org, o.repoSlug
 	if org == "" || slug == "" {
@@ -281,12 +300,34 @@ func createPRs(ctx context.Context, o options, groups []worker.PRGroup, maxOpen 
 		return fmt.Errorf("resolve %s/%s: %w", org, slug, err)
 	}
 
+	base, err := resolveBase(ctx, git, o.base, repo.DefaultBranch)
+	if err != nil {
+		return err
+	}
+
 	fmt.Printf("\nopening PRs on %s/%s (base %s, remote %s)...\n", org, slug, base, o.remote)
 	results := worker.OpenPRs(ctx, git, sc, repo.ID, base, o.remote, groups, maxOpen)
 	if failed := summarizeResults(results); failed > 0 {
 		return fmt.Errorf("%d PR(s) failed", failed)
 	}
 	return nil
+}
+
+// resolveBase picks the pull request's target branch: an explicit --base, else
+// the checked-out branch, else the repo's default branch. CI checkouts are
+// usually detached, where the "current branch" reads as "HEAD" — not a real
+// branch the API accepts — so fall back to the repo default.
+func resolveBase(ctx context.Context, git *worker.Git, flag, repoDefault string) (string, error) {
+	if flag != "" {
+		return flag, nil
+	}
+	if b, err := git.CurrentBranch(ctx); err == nil && b != "" && b != "HEAD" {
+		return b, nil
+	}
+	if repoDefault != "" {
+		return repoDefault, nil
+	}
+	return "", errors.New("could not determine the base branch (detached checkout, no repo default) — pass --base")
 }
 
 // summarizeResults prints each PR outcome and returns the failure count.

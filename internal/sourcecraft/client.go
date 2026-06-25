@@ -5,20 +5,21 @@
 // https://api.sourcecraft.tech/sourcecraft.swagger.json.
 //
 // Auth is a bearer Personal Access Token (in CI, the SOURCECRAFT_TOKEN
-// variable). The client is stdlib-only and never panics on a remote error: it
-// returns a wrapped error the caller can surface.
+// variable). HTTP is via the resty client; it never panics on a remote error,
+// returning a wrapped error the caller can surface.
 package sourcecraft
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+
+	"resty.dev/v3"
 )
 
 // DefaultBaseURL is the production Sourcecraft REST API root.
@@ -32,6 +33,7 @@ type Client struct {
 	baseURL    string
 	token      string
 	httpClient *http.Client
+	client     *resty.Client
 }
 
 // Option configures a Client.
@@ -57,14 +59,20 @@ func WithHTTPClient(h *http.Client) Option {
 
 // New builds a Client authenticated with the given personal access token.
 func New(token string, opts ...Option) *Client {
-	c := &Client{
-		baseURL:    DefaultBaseURL,
-		token:      token,
-		httpClient: &http.Client{Timeout: 30 * time.Second},
-	}
+	c := &Client{baseURL: DefaultBaseURL, token: token}
 	for _, opt := range opts {
 		opt(c)
 	}
+	rc := resty.New()
+	if c.httpClient != nil {
+		rc = resty.NewWithClient(c.httpClient)
+	}
+	c.client = rc.
+		SetTimeout(30*time.Second).
+		SetResponseBodyLimit(maxResponseBytes).
+		SetBaseURL(c.baseURL).
+		SetAuthToken(c.token).
+		SetHeader("Accept", "application/json")
 	return c
 }
 
@@ -182,20 +190,25 @@ func (c *Client) CreatePullRequest(ctx context.Context, repoID string, body Crea
 // ListMyPulls returns pull requests authored by the authenticated user, across
 // all pages. It backs idempotency checks (don't reopen a PR we already have).
 func (c *Client) ListMyPulls(ctx context.Context) ([]PullRequest, error) {
-	return c.listPulls(ctx, "/me/pulls")
+	// /me/pulls requires a concrete role; an unset role is sent as
+	// role_unspecified, which the API rejects. We want PRs the bot authored.
+	q := url.Values{}
+	q.Set("role", "author")
+	return c.listPulls(ctx, "/me/pulls", q)
 }
 
 // ListRepoPulls returns the pull requests of the repo identified by repoID,
 // across all pages.
 func (c *Client) ListRepoPulls(ctx context.Context, repoID string) ([]PullRequest, error) {
-	return c.listPulls(ctx, "/repos/id:"+url.PathEscape(repoID)+"/pulls")
+	return c.listPulls(ctx, "/repos/id:"+url.PathEscape(repoID)+"/pulls", nil)
 }
 
-func (c *Client) listPulls(ctx context.Context, path string) ([]PullRequest, error) {
+func (c *Client) listPulls(ctx context.Context, path string, base url.Values) ([]PullRequest, error) {
 	var all []PullRequest
 	pageToken := ""
 	for {
 		q := url.Values{}
+		maps.Copy(q, base)
 		if pageToken != "" {
 			q.Set("page_token", pageToken)
 		}
@@ -248,45 +261,23 @@ func (c *Client) FindOpenPRBySourceBranch(ctx context.Context, branch string) (*
 // do performs an authenticated JSON request. A non-2xx status is an error
 // carrying a snippet of the response body.
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, body, out any) error {
-	endpoint := c.baseURL + path
+	req := c.client.R().SetContext(ctx)
 	if len(query) > 0 {
-		endpoint += "?" + query.Encode()
+		req.SetQueryParamsFromValues(query)
 	}
-
-	var reader io.Reader
 	if body != nil {
-		encoded, err := json.Marshal(body)
-		if err != nil {
-			return fmt.Errorf("sourcecraft: encode request: %w", err)
-		}
-		reader = bytes.NewReader(encoded)
+		req.SetBody(body) // resty marshals to JSON and sets Content-Type
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
-	if err != nil {
-		return fmt.Errorf("sourcecraft: build request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Accept", "application/json")
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-
-	resp, err := c.httpClient.Do(req)
+	res, err := req.Execute(method, path)
 	if err != nil {
 		return fmt.Errorf("sourcecraft: %s %s: %w", method, path, err)
 	}
-	defer resp.Body.Close()
-
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
-	if err != nil {
-		return fmt.Errorf("sourcecraft: read response: %w", err)
+	if sc := res.StatusCode(); sc < 200 || sc >= 300 {
+		return fmt.Errorf("sourcecraft: %s %s: status %d: %s", method, path, sc, snippet(res.Bytes()))
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("sourcecraft: %s %s: status %d: %s", method, path, resp.StatusCode, snippet(data))
-	}
-	if out != nil && len(data) > 0 {
-		if err := json.Unmarshal(data, out); err != nil {
+	if out != nil && len(res.Bytes()) > 0 {
+		if err := json.Unmarshal(res.Bytes(), out); err != nil {
 			return fmt.Errorf("sourcecraft: decode response: %w", err)
 		}
 	}

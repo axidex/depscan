@@ -10,15 +10,14 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"sort"
 	"strings"
 
-	"github.com/axidex/depscan/internal/remediate"
+	"github.com/axidex/craftnovate/internal/remediate"
 )
 
 // BranchPrefix namespaces every branch this tool creates, so they are easy to
 // recognize and the idempotency check can match them.
-const BranchPrefix = "depscan/"
+const BranchPrefix = "craftnovate/"
 
 // PRGroup is one pull request: a set of upgrades sharing a branch, plus the
 // labels to apply.
@@ -31,15 +30,17 @@ type PRGroup struct {
 	Upgrades   []remediate.Upgrade
 }
 
-// Update pairs an upgrade with its resolved policy (config groupName + labels).
+// Update pairs an upgrade with its resolved policy (config groupName + labels)
+// and the manager label used for ecosystem grouping.
 type Update struct {
 	Upgrade   remediate.Upgrade
 	GroupName string // when set, all updates with this name share one PR
+	Manager   string // ecosystem label (e.g. "gradle"/"pypi"/"npm")
 	Labels    []string
 }
 
-// GroupUpgrades groups upgrades by coordinate with no policy (one PR per
-// dependency). It is the policy-free entry used by tests and the default flow.
+// GroupUpgrades groups upgrades one PR per dependency (no policy). It is the
+// policy-free entry used by tests and the simple flow.
 func GroupUpgrades(ups []remediate.Upgrade) []PRGroup {
 	updates := make([]Update, len(ups))
 	for i, u := range ups {
@@ -48,56 +49,17 @@ func GroupUpgrades(ups []remediate.Upgrade) []PRGroup {
 	return GroupUpdates(updates)
 }
 
-// GroupUpdates groups updates by config groupName when set, otherwise by
-// coordinate, deterministically deriving each group's branch, title, body and
-// labels. A coordinate group keeps the stable "<coord>-<target>" branch so
-// re-runs match; a named group keys on the name.
+// GroupUpdates groups updates one PR per dependency (honoring an explicit config
+// groupName). It is GroupUpdatesWith under the per-dependency strategy.
 func GroupUpdates(updates []Update) []PRGroup {
-	byKey := map[string][]Update{}
-	var order []string
-	named := map[string]bool{}
-	for _, u := range updates {
-		key := u.Upgrade.Dep.Coordinate()
-		if u.GroupName != "" {
-			key = u.GroupName
-			named[key] = true
-		}
-		if _, ok := byKey[key]; !ok {
-			order = append(order, key)
-		}
-		byKey[key] = append(byKey[key], u)
-	}
-	sort.Strings(order)
+	return GroupUpdatesWith(updates, StrategyPerDependency)
+}
 
-	groups := make([]PRGroup, 0, len(order))
-	for _, key := range order {
-		list := byKey[key]
-		ups := make([]remediate.Upgrade, len(list))
-		labelSet := map[string]bool{}
-		var labels []string
-		for i, u := range list {
-			ups[i] = u.Upgrade
-			for _, l := range u.Labels {
-				if !labelSet[l] {
-					labelSet[l] = true
-					labels = append(labels, l)
-				}
-			}
-		}
-		g := PRGroup{Coordinate: key, Labels: labels, Upgrades: ups}
-		if named[key] {
-			g.Branch = BranchPrefix + sanitizeRef(key)
-			g.Title = "chore(deps): update " + key
-			g.Body = prBodyGroup(key, ups)
-		} else {
-			target := ups[0].Target
-			g.Branch = BranchPrefix + sanitizeRef(key) + "-" + sanitizeRef(target)
-			g.Title = fmt.Sprintf("chore(deps): update %s to %s", key, target)
-			g.Body = prBody(key, ups)
-		}
-		groups = append(groups, g)
-	}
-	return groups
+// branchPart sanitizes a string for use as the leading component of a branch ref
+// and strips leading dashes, so a scoped npm name ("@angular") yields a clean
+// component ("angular") instead of one beginning with '-'.
+func branchPart(s string) string {
+	return strings.TrimLeft(sanitizeRef(s), "-")
 }
 
 // sanitizeRef makes a string safe for a git branch ref: anything outside
@@ -123,7 +85,7 @@ func prBodyGroup(name string, ups []remediate.Upgrade) string {
 	for _, u := range ups {
 		fmt.Fprintf(&b, "- `%s` `%s:%d` (%s → %s)%s\n", u.Dep.Coordinate(), u.Dep.File, u.Dep.Line, u.Dep.Version, u.Target, vulnNote(u))
 	}
-	b.WriteString("\n---\nOpened by depscan.\n")
+	b.WriteString("\n---\nOpened by craftnovate.\n")
 	return b.String()
 }
 
@@ -135,7 +97,7 @@ func prBody(coord string, ups []remediate.Upgrade) string {
 	for _, u := range ups {
 		fmt.Fprintf(&b, "- `%s:%d` (%s → %s)%s\n", u.Dep.File, u.Dep.Line, u.Dep.Version, u.Target, vulnNote(u))
 	}
-	b.WriteString("\n---\nOpened by depscan.\n")
+	b.WriteString("\n---\nOpened by craftnovate.\n")
 	return b.String()
 }
 
@@ -213,7 +175,7 @@ func RepoFromRemote(ctx context.Context, git *Git, remote string) (org, repo str
 // runs apply to edit files there, commits, and force-pushes the branch — leaving
 // the caller's working tree untouched. The worktree is always cleaned up.
 func (g *Git) PushBranchWithEdits(ctx context.Context, base, branch, message, remote string, apply func(dir string) error) (err error) {
-	tmp, err := os.MkdirTemp("", "depscan-*")
+	tmp, err := os.MkdirTemp("", "craftnovate-*")
 	if err != nil {
 		return fmt.Errorf("worker: mkdtemp: %w", err)
 	}

@@ -7,8 +7,8 @@ import (
 
 	"go.uber.org/mock/gomock"
 
-	"github.com/axidex/depscan/internal/remediate"
-	"github.com/axidex/depscan/internal/sourcecraft"
+	"github.com/axidex/craftnovate/internal/remediate"
+	"github.com/axidex/craftnovate/internal/sourcecraft"
 )
 
 func up(group, artifact, version, target, file string, line int) remediate.Upgrade {
@@ -37,7 +37,7 @@ func TestGroupUpgrades(t *testing.T) {
 	if okio.Coordinate != "com.squareup.okio:okio" {
 		t.Fatalf("first group = %q", okio.Coordinate)
 	}
-	if okio.Branch != "depscan/com.squareup.okio-okio-3.12.0" {
+	if okio.Branch != "craftnovate/com.squareup.okio-okio-3.12.0" {
 		t.Errorf("okio branch = %q", okio.Branch)
 	}
 	if !strings.Contains(okio.Title, "com.squareup.okio:okio") || !strings.Contains(okio.Title, "3.12.0") {
@@ -73,8 +73,8 @@ func TestParseRemoteURL(t *testing.T) {
 		raw, org, repo string
 	}{
 		{"ssh://git.example.com/org/repo.git", "org", "repo"},
-		{"ssh://ssh.o.cloud-preprod.yandex.net/pub-axidex/appsec-mirror.git", "pub-axidex", "appsec-mirror"},
-		{"git@github.com:axidex/depscan.git", "axidex", "depscan"},
+		{"ssh://git.example.com/team-a/service-mirror.git", "team-a", "service-mirror"},
+		{"git@github.com:axidex/craftnovate.git", "axidex", "craftnovate"},
 		{"https://host/org/repo", "org", "repo"},
 	}
 	for _, tt := range tests {

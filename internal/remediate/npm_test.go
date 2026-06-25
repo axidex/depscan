@@ -84,7 +84,7 @@ func TestNPMRangePreservedThroughPlanAndApply(t *testing.T) {
 		"left-pad": {"1.3.0"},            // already latest
 		"jest":     {"29.0.0", "29.7.0"}, // minor bump
 	}}
-	ups, errs := PlanUpgrades(context.Background(), declared, ds, DefaultSelector{}, 4)
+	ups, errs := PlanUpgrades(context.Background(), declared, ds, DefaultSelector{}, 4, false)
 	if len(errs) != 0 {
 		t.Fatalf("errs: %v", errs)
 	}

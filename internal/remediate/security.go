@@ -1,6 +1,6 @@
 package remediate
 
-import "github.com/axidex/depscan/internal/versioning"
+import "github.com/axidex/craftnovate/internal/versioning"
 
 // VulnAdvisory is a vulnerability source's outcome for one coordinate@version.
 type VulnAdvisory struct {
@@ -14,9 +14,10 @@ func AdvisoryKey(datasource, coordinate, version string) string {
 }
 
 // PlanSecurity reconciles normal upgrades with vulnerability advisories: for a
-// vulnerable declared dependency it prefers the minimal fixed version that is an
-// upgrade (a security upgrade), otherwise it keeps the normal upgrade. The
-// result has one entry per editable site, security upgrades taking precedence.
+// vulnerable declared dependency it replaces that site's normal upgrade(s) with
+// a single security upgrade to the minimal fixed version, otherwise it keeps the
+// normal upgrade(s). A site may carry more than one normal upgrade when
+// major/minor are separated, so they are tracked per site as a slice.
 func PlanSecurity(declared []DeclaredDependency, normal []Upgrade, advisories map[string]VulnAdvisory) []Upgrade {
 	type siteKey struct {
 		file string
@@ -25,22 +26,25 @@ func PlanSecurity(declared []DeclaredDependency, normal []Upgrade, advisories ma
 	}
 	siteOf := func(d DeclaredDependency) siteKey { return siteKey{d.File, d.Line, d.Col} }
 
-	bySite := make(map[siteKey]Upgrade, len(normal))
+	bySite := make(map[siteKey][]Upgrade, len(normal))
 	for _, u := range normal {
-		bySite[siteOf(u.Dep)] = u
+		k := siteOf(u.Dep)
+		bySite[k] = append(bySite[k], u)
 	}
 
 	out := make([]Upgrade, 0, len(normal))
 	for _, d := range declared {
 		if adv, ok := advisories[AdvisoryKey(d.Datasource, d.Coordinate(), d.Version)]; ok {
-			if sec := minFixUpgrade(versioning.Get(d.Datasource), d.Version, adv.FixedVersions); sec != "" {
-				out = append(out, Upgrade{Dep: d, Target: sec, Security: true, VulnIDs: adv.VulnIDs})
+			v := versioning.Get(d.Datasource)
+			if sec := minFixUpgrade(v, d.Version, adv.FixedVersions); sec != "" {
+				out = append(out, Upgrade{
+					Dep: d, Target: v.NewValue(d.Version, sec), UpdateType: v.UpdateType(d.Version, sec),
+					Security: true, VulnIDs: adv.VulnIDs,
+				})
 				continue
 			}
 		}
-		if u, ok := bySite[siteOf(d)]; ok {
-			out = append(out, u)
-		}
+		out = append(out, bySite[siteOf(d)]...)
 	}
 	return out
 }

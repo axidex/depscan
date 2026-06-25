@@ -5,11 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+
+	"resty.dev/v3"
 )
 
 // defaultNPMBase is the public npm registry.
@@ -17,8 +18,9 @@ const defaultNPMBase = "https://registry.npmjs.org"
 
 // NPM lists published versions from an npm registry packument.
 type NPM struct {
-	client  *http.Client
-	baseURL string
+	client     *resty.Client
+	httpClient *http.Client
+	baseURL    string
 }
 
 // NPMOption configures an NPM datasource.
@@ -28,7 +30,7 @@ type NPMOption func(*NPM)
 func WithNPMHTTPClient(c *http.Client) NPMOption {
 	return func(n *NPM) {
 		if c != nil {
-			n.client = c
+			n.httpClient = c
 		}
 	}
 }
@@ -44,10 +46,11 @@ func WithNPMBaseURL(u string) NPMOption {
 
 // NewNPM builds an npm datasource.
 func NewNPM(opts ...NPMOption) *NPM {
-	n := &NPM{client: &http.Client{Timeout: 20 * time.Second}, baseURL: defaultNPMBase}
+	n := &NPM{baseURL: defaultNPMBase}
 	for _, opt := range opts {
 		opt(n)
 	}
+	n.client = newRestyClient(n.httpClient, 20*time.Second)
 	return n
 }
 
@@ -61,32 +64,21 @@ func (n *NPM) Versions(ctx context.Context, group, artifact string) ([]string, e
 	}
 	endpoint := n.baseURL + "/" + url.PathEscape(artifact) // PathEscape encodes the scope '/'
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, fmt.Errorf("datasource: npm: build request: %w", err)
-	}
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := n.client.Do(req)
+	res, err := n.client.R().SetContext(ctx).Get(endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("datasource: npm: %s: %w", artifact, err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
+	if res.StatusCode() == http.StatusNotFound {
 		return nil, ErrNotFound
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
-	if err != nil {
-		return nil, fmt.Errorf("datasource: npm: read response: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("datasource: npm: %s: status %d", artifact, resp.StatusCode)
+	if res.StatusCode() != http.StatusOK {
+		return nil, fmt.Errorf("datasource: npm: %s: status %d", artifact, res.StatusCode())
 	}
 
 	var payload struct {
 		Versions map[string]json.RawMessage `json:"versions"`
 	}
-	if err := json.Unmarshal(data, &payload); err != nil {
+	if err := json.Unmarshal(res.Bytes(), &payload); err != nil {
 		return nil, fmt.Errorf("datasource: npm: decode: %w", err)
 	}
 	if len(payload.Versions) == 0 {

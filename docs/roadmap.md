@@ -1,4 +1,4 @@
-# depscan — roadmap to a full-featured dependency-update tool for Sourcecraft
+# craftnovate — roadmap to a full-featured dependency-update tool for Sourcecraft
 
 Clean-room, permissive (no AGPL) Go dependency-update tool for Sourcecraft. This
 is the living checklist; tick items as they land. Each item ships with tests; the
@@ -7,7 +7,7 @@ whole pipeline is covered by a hermetic e2e (`internal/worker`, httptest registr
 Architecture (role → our package): manager → `internal/remediate`,
 datasource → `internal/datasource`, versioning → `internal/mavenver`,
 lookup/config → `internal/config`, worker → `internal/worker`, platform →
-`internal/sourcecraft`. CLI: `cmd/depscan`.
+`internal/sourcecraft`. CLI: `cmd/craftnovate`.
 
 ## Foundation (pre-M1) — DONE
 - [x] `mavenver`: Compare, IsStable, IsUpgrade, SelectUpgrade (Apache ComparableVersion port) + tests
@@ -20,7 +20,7 @@ lookup/config → `internal/config`, worker → `internal/worker`, platform →
 
 ## M1 — control & correctness
 - [x] `mavenver.UpdateType(current, target)` → major/minor/patch + tests
-- [x] `internal/config` (depscan.json analog): Config/PackageRule, Defaults/Merge/Discover/Load
+- [x] `internal/config` (craftnovate.json analog): Config/PackageRule, Defaults/Merge/Discover/Load
 - [x] packageRules matcher (matchPackageNames incl. `/regex/` + artifact tail, matchPackagePrefixes, matchUpdateTypes, matchManagers); Decide last-wins
 - [x] `allowedVersions` evaluator (exact, `<`/`<=`/`>`/`>=`/`=`, `/regex/`) + `ignoreUnstable` + `ignoreDeps`
 - [x] `config.Selector` wired into `remediate.PlanUpgrades` (Selector seam, default preserves behavior) — fixes the `0.7.0-0.6.x-compat` case via ignoreUnstable/allowedVersions
