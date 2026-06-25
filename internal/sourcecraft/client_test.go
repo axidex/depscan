@@ -55,8 +55,8 @@ func TestCreatePullRequest(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("decode body: %v", err)
 		}
-		if body.SourceBranch != "depscan/bump-bcpkix" || body.TargetBranch != "main" {
-			t.Errorf("branches = %s -> %s, want depscan/bump-bcpkix -> main", body.SourceBranch, body.TargetBranch)
+		if body.SourceBranch != "craftnovate/bump-bcpkix" || body.TargetBranch != "main" {
+			t.Errorf("branches = %s -> %s, want craftnovate/bump-bcpkix -> main", body.SourceBranch, body.TargetBranch)
 		}
 		if !body.Publish {
 			t.Error("publish = false, want true")
@@ -66,7 +66,7 @@ func TestCreatePullRequest(t *testing.T) {
 
 	pr, err := c.CreatePullRequest(context.Background(), "r1", CreatePullRequestBody{
 		Title:        "Bump bcpkix",
-		SourceBranch: "depscan/bump-bcpkix",
+		SourceBranch: "craftnovate/bump-bcpkix",
 		TargetBranch: "main",
 		Publish:      true,
 	})
@@ -90,14 +90,14 @@ func TestFindOpenPRBySourceBranch_Paginates(t *testing.T) {
 			})
 		case "p2":
 			_ = json.NewEncoder(w).Encode(listPullsResponse{
-				PullRequests: []PullRequest{{ID: "b", SourceBranch: "depscan/target"}},
+				PullRequests: []PullRequest{{ID: "b", SourceBranch: "craftnovate/target"}},
 			})
 		default:
 			t.Errorf("unexpected page_token %q", r.URL.Query().Get("page_token"))
 		}
 	})
 
-	pr, err := c.FindOpenPRBySourceBranch(context.Background(), "depscan/target")
+	pr, err := c.FindOpenPRBySourceBranch(context.Background(), "craftnovate/target")
 	if err != nil {
 		t.Fatalf("FindOpenPRBySourceBranch: %v", err)
 	}

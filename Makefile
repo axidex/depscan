@@ -1,17 +1,19 @@
-BINARY      := depscan
-PKG         := ./cmd/depscan
+BINARY      := craftnovate
+PKG         := ./cmd/craftnovate
 VERSION     ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS     := -s -w -X main.version=$(VERSION)
+IMAGE       ?= ghcr.io/axidex/craftnovate
+IMAGE_TAG   ?= dev
 
-.PHONY: all build install test test-race cover vet fmt lint tidy clean run snapshot release-check release-patch release-minor release-major
+.PHONY: all build install test test-race cover vet fmt lint tidy clean run snapshot docker-build docker-run release-check release-patch release-minor release-major
 
 all: build
 
-build: ## Build the depscan binary into ./bin
+build: ## Build the craftnovate binary into ./bin
 	@mkdir -p bin
 	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) $(PKG)
 
-install: ## Install depscan into $GOBIN
+install: ## Install craftnovate into $GOBIN
 	go install -ldflags "$(LDFLAGS)" $(PKG)
 
 test: ## Run unit + hermetic e2e tests (no network)
@@ -38,6 +40,12 @@ release-check: ## Validate the GoReleaser config
 
 snapshot: ## Build a local cross-platform snapshot release into dist/ (no publish)
 	goreleaser release --snapshot --clean
+
+docker-build: ## Build the Docker image (override IMAGE/IMAGE_TAG/VERSION)
+	docker build --build-arg VERSION=$(VERSION) -t $(IMAGE):$(IMAGE_TAG) .
+
+docker-run: docker-build ## Run craftnovate in Docker against REPO (default .; dry-run)
+	docker run --rm -v $(abspath $(or $(REPO),.)):/repo $(IMAGE):$(IMAGE_TAG) --repo /repo
 
 release-patch: ## Compute & push the next PATCH tag (triggers the Release workflow)
 	./scripts/release.sh patch

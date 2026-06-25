@@ -1,5 +1,5 @@
-// Package config is depscan's policy configuration. It resolves built-in
-// defaults with a repo config file (depscan.json) and an ordered packageRules
+// Package config is craftnovate's policy configuration. It resolves built-in
+// defaults with a repo config file (craftnovate.json) and an ordered packageRules
 // array into a per-dependency Decision (enabled, allowed versions, stability,
 // grouping, labels, reviewers), and provides a Selector that turns that policy
 // into the chosen upgrade target.
@@ -15,7 +15,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/axidex/depscan/internal/versioning"
+	"github.com/axidex/craftnovate/internal/versioning"
 )
 
 // Config is the resolved configuration. Pointer fields distinguish "unset" from
@@ -28,7 +28,11 @@ type Config struct {
 	GroupName       string   `json:"groupName,omitempty"`
 	Labels          []string `json:"labels,omitempty"`
 	Reviewers       []string `json:"reviewers,omitempty"`
-	// PRConcurrentLimit caps how many depscan PRs may be open at once
+	// GroupStrategy controls how upgrades are batched into pull requests:
+	// "monorepo" (default — separate major from minor/patch and group
+	// known monorepo families), "per-dependency", "ecosystem", or "all".
+	GroupStrategy string `json:"groupStrategy,omitempty"`
+	// PRConcurrentLimit caps how many craftnovate PRs may be open at once
 	// (0 = unlimited).
 	PRConcurrentLimit int           `json:"prConcurrentLimit,omitempty"`
 	PackageRules      []PackageRule `json:"packageRules,omitempty"`
@@ -83,9 +87,9 @@ func Defaults() Config {
 
 // candidateNames is the ordered list of config file names; the first found wins.
 var candidateNames = []string{
-	"depscan.json",
-	".depscan.json",
-	filepath.Join(".github", "depscan.json"),
+	"craftnovate.json",
+	".craftnovate.json",
+	filepath.Join(".github", "craftnovate.json"),
 }
 
 // Discover returns the path of the first config file present under root.
@@ -132,6 +136,9 @@ func (c Config) Merge(over Config) Config {
 	}
 	if over.GroupName != "" {
 		out.GroupName = over.GroupName
+	}
+	if over.GroupStrategy != "" {
+		out.GroupStrategy = over.GroupStrategy
 	}
 	if len(over.IgnoreDeps) > 0 {
 		out.IgnoreDeps = over.IgnoreDeps

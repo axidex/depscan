@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/axidex/depscan/internal/config"
-	"github.com/axidex/depscan/internal/datasource"
-	"github.com/axidex/depscan/internal/remediate"
-	"github.com/axidex/depscan/internal/worker"
+	"github.com/axidex/craftnovate/internal/config"
+	"github.com/axidex/craftnovate/internal/datasource"
+	"github.com/axidex/craftnovate/internal/remediate"
+	"github.com/axidex/craftnovate/internal/worker"
 )
 
 // fakeMavenCentral serves the Maven Central solrsearch response for the given
@@ -78,7 +78,7 @@ func TestPipelineE2E(t *testing.T) {
             {"matchPackagePrefixes": ["org.junit"], "allowedVersions": "<5.13"}
         ]
     }`
-	mustWrite(t, filepath.Join(root, "depscan.json"), cfgJSON)
+	mustWrite(t, filepath.Join(root, "craftnovate.json"), cfgJSON)
 
 	srv := fakeMavenCentral(t, map[string][]string{
 		"bcpkix-jdk18on": {"1.80", "1.79", "1.78.1"},
@@ -104,7 +104,7 @@ func TestPipelineE2E(t *testing.T) {
 	ds := datasource.NewMaven(datasource.WithHTTPClient(srv.Client()), datasource.WithSearchURL(srv.URL))
 	datasources := map[string]remediate.VersionLister{"maven": ds}
 
-	ups, errs := remediate.PlanUpgrades(context.Background(), declared, datasources, sel, 4)
+	ups, errs := remediate.PlanUpgrades(context.Background(), declared, datasources, sel, 4, false)
 	if len(errs) != 0 {
 		t.Fatalf("lookup errors: %v", errs)
 	}
@@ -197,7 +197,7 @@ netty-handler = { module = "io.netty:netty-handler", version.ref = "netty" }
 	ds := datasource.NewMaven(datasource.WithHTTPClient(srv.Client()), datasource.WithSearchURL(srv.URL))
 	datasources := map[string]remediate.VersionLister{"maven": ds}
 
-	ups, errs := remediate.PlanUpgrades(context.Background(), declared, datasources, config.NewSelector(cfg, "gradle"), 4)
+	ups, errs := remediate.PlanUpgrades(context.Background(), declared, datasources, config.NewSelector(cfg, "gradle"), 4, false)
 	if len(errs) != 0 {
 		t.Fatalf("lookup errors: %v", errs)
 	}
