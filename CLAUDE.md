@@ -1,65 +1,91 @@
 # depscan
 
-SBOM (CycloneDX JSON) → SARIF 2.1.0 dependency-update analyzer. Module
-`github.com/axidex/depscan`, Go 1.26. Vulns from OSV.dev; "outdated" from
-npm/PyPI/Maven registries. Architecture & full CLI reference live in README.md.
+A permissive, **clean-room automated dependency-update tool for the Sourcecraft
+platform** (Yandex Cloud git). Module `github.com/axidex/depscan`, Go 1.26. It
+scans a project's manifests, finds newer stable versions in the registries, and
+reports / applies / opens pull requests on Sourcecraft, raising the fixed version
+for dependencies with known vulnerabilities. Runs on the project — **no SBOM** —
+and **never executes the build tool**. Full reference in README.md; the remaining
+work is tracked in `docs/roadmap.md` (the living checklist).
+
+> History: this repo used to be a CycloneDX-SBOM → SARIF analyzer. That tool was
+> deleted in favor of this dependency-update tool. Don't reintroduce SBOM/SARIF.
+
+## License posture (hard constraint)
+Permissive only. **Never copy or vendor any AGPL-licensed dependency bot's code** —
+reimplement behavior from public specs/observed behavior. Inputs allowed: this
+repo's own code, the Apache-2.0 Maven `ComparableVersion` algorithm (ported in
+`internal/mavenver`), the public Sourcecraft REST API. Writing in Go also keeps
+clean-room distance.
 
 ## Commands
-- Run: `go run ./cmd/depscan -s bom.json` — use the **package path**, not
-  `go run cmd/depscan/main.go` (cmd spans main.go/root.go/run.go; a single-file
-  run fails with "undefined: newRootCmd").
-- `make test` (hermetic, no network) · `make test-race` · `make test-e2e`
-  (live OSV+Maven, needs network) · `make cover` · `make build`.
-- `make lint` (golangci-lint v2, `.golangci.yml`) · `make snapshot` /
-  `make release-check` (GoReleaser dry-run / validate).
-- Before finishing: `gofmt -s -w .`, `go test -race ./...`, `golangci-lint run ./...`.
-- CI in `.github/workflows/` (ci.yml: test+lint+govulncheck; release.yml:
-  GoReleaser on `v*` tags + a `workflow_dispatch` major/minor/patch dropdown).
-- Release (semver, tag-driven; version computed, not hand-counted):
-  `make release-patch|release-minor|release-major` → `scripts/release.sh` bumps
-  the latest tag and pushes it → release.yml builds. The tag is the version
-  source (`-X main.version`).
+- Run: `go run ./cmd/depscan --repo /path/to/project` (dry-run). `--write` applies
+  edits locally; `--create-prs` opens PRs (needs `SOURCECRAFT_TOKEN`).
+- `make build` (→ `./bin/depscan`) · `make test` (unit + hermetic e2e, no
+  network) · `make test-race` · `make cover` · `make lint` (golangci-lint v2) ·
+  `make run REPO=…`.
+- Before finishing: `gofmt -s -w .`, `go test ./...`, `golangci-lint run ./...`.
+- Release (tag-driven): `make release-patch|minor|major` → `scripts/release.sh`
+  pushes a tag → `release.yml` runs GoReleaser (`.goreleaser.yaml` builds
+  `./cmd/depscan`; tag is the version source, `-X main.version`).
 
-## CLI (cobra + viper)
-- Flag value resolves: flag → env `DEPSCAN_*` (dashes→underscores) →
-  `.depscan.yaml` → default.
-- SARIF → `--out` (or stdout via `--out -`); all progress/logs/summary →
-  **stderr** only, never mixed. `--out=- --format=table` is rejected.
-- `--debug` enables `log/slog` debug records to stderr.
-- Exit codes: 0 ok · 1 runtime error or `--fail-on` gate · 2 usage error.
+## Architecture (role → package)
+- `cmd/depscan` — cobra CLI: flags, manager loop, dry-run/write/create-prs.
+- `internal/remediate` — **managers**: Gradle (literals, `gradle.properties`/`val`
+  refs, `libs.versions.toml` catalog, plugins), PyPI (`requirements*.txt`), npm
+  (`package.json`); `Manager` interface + `Managers()`; `PlanUpgrades` (a
+  `Selector` seam + datasource dispatch), `ApplyUpgrades` (minimal in-place edit),
+  `PlanSecurity` (OSV-fix overlay).
+- `internal/datasource` — **datasources**: Maven Central (solr), Gradle Plugin
+  Portal (maven-metadata.xml), PyPI (JSON), npm (packument).
+- `internal/versioning` — **versioning** interface; `Maven` (wraps mavenver),
+  `PEP440`, `NPM` (semver + `NewValue` preserving `^`/`~`); `Get(datasource)`.
+- `internal/mavenver` — clean-room Apache `ComparableVersion` port.
+- `internal/config` — **policy**: `depscan.json` (Config/PackageRule/Decide/Matches,
+  allowedVersions, ignoreUnstable/ignoreDeps, groupName, labels, prConcurrentLimit);
+  `Selector` (takes a `versioning.Versioning` per call).
+- `internal/osv` — **vulnerability**: OSV querybatch + hydrate + fix extraction.
+- `internal/worker` — **worker/platform glue**: `GroupUpgrades`/`GroupUpdates`,
+  `Git.PushBranchWithEdits` (throwaway `git worktree`), `OpenPRs` (idempotent,
+  concurrency-limited, labels), `RepoFromRemote`.
+- `internal/sourcecraft` — **platform**: REST client (GetRepo, CreatePullRequest,
+  UpdatePullRequest, MergePullRequest, SetLabels, ListMyPulls/ListRepoPulls).
 
-## Testing (suite is fully offline)
-- Network clients sit behind interfaces, mocked with `httptest`.
-- `cmd`: override the `newScanner` package var to inject fakes; call `runScan()`
-  directly for hermetic end-to-end.
-- `vuln`: `WithEndpoints(batchURL, vulnBase)` + `WithRetries` aim the OSV client
-  at a test server. `outdated`: pass an `*http.Client` with a URL-rewriting
-  `RoundTripper`. Loggers default to `slog.New(slog.DiscardHandler)`.
-- e2e: `e2e/parse_test.go` (hermetic, default) + `e2e/live_test.go`
-  (`//go:build e2e`); the live test asserts SARIF invariants, not CVE counts.
+## Verified gotchas (don't re-derive)
+- **Versions are ecosystem-specific, not generic semver.** Maven (`4.1.133.Final`,
+  `5.0.0.CR7`), PEP 440, npm each have their own ordering — always go through
+  `internal/versioning`, never string/`Masterminds` compare. Pre-releases (rc/alpha/
+  milestone/snapshot/dev) are never proposed unless current is already a pre-release;
+  this avoids false "newer" (RC tags, `.Final` downgrades).
+- **Per-ecosystem value rewrite**: `Versioning.NewValue(currentValue, newVersion)` —
+  Maven/PyPI pin (return newVersion), npm preserves `^`/`~`. `PlanUpgrades` wraps the
+  chosen version with it.
+- **PR creation is outward-facing**: `--create-prs` pushes branches (throwaway
+  worktree; checkout untouched) and opens PRs; gated on `SOURCECRAFT_TOKEN`,
+  default dry-run; idempotent via `ListMyPulls`. There is **no REST commit endpoint**
+  on Sourcecraft (branches/trees are read-only) → a real `git push` is required.
+- **Sourcecraft API base differs per instance**: the public default is
+  `https://api.sourcecraft.tech`; self-hosted/enterprise instances differ — pass
+  `--api-url`. Bearer PAT / `SOURCECRAFT_TOKEN`. OpenAPI at `/sourcecraft.swagger.json`.
+- **OSV**: querybatch versioned purls; hydrate `GET /v1/vulns/{id}`; fix in
+  `affected[].ranges[].events[].fixed` (GIT → `database_specific.versions`); skip
+  withdrawn; PyPI name match needs PEP 503. Only maven/pypi are OSV-checked (npm
+  ranges have no single resolved version).
 
-## Verified API gotchas (don't re-derive or regress)
-- OSV querybatch: send a versioned purl alone — passing both `version` and a
-  versioned purl → HTTP 400. Batch returns only `{id, modified}`; hydrate each
-  via `GET /v1/vulns/{id}`, cached by ID. Skip `withdrawn` records.
-- OSV fix version: `affected[].ranges[].events[].fixed`; for GIT ranges it's in
-  `database_specific.versions[].fixed`.
-- OSV affected-name match: Maven names are `group:artifact` (colon); PyPI needs
-  PEP 503 normalization (`[-_.]+`→`-`, lowercased).
-- Maven Central returns HTTP 200 with `numFound:0` for missing packages (no 404).
-
-## CI / release gotchas
-- golangci-lint v2: suppress gosec with `//nolint:gosec // reason` — it ignores
-  `//nosec`. `.golangci.yml` excludes gosec G104 (errcheck covers it) + the
-  `std-error-handling` preset; `_test.go` is exempt from errcheck/gosec/funlen.
-- CI test matrix is 1.26+ only — go.mod pins `go 1.26.3`, so 1.25 fails the build.
-- Immutable releases are **draft-first**: keep `release.draft: true` in
-  `.goreleaser.yaml`; release.yml publishes via `gh release edit --draft=false`.
-  Flipping to `draft: false` breaks asset upload once immutability is enabled.
-- Writing `.github/workflows/*` trips a security-reminder hook that denies the
-  first Write — just re-issue it.
+## CI / release
+- `.github/workflows/ci.yml` (generic: `go build/test -race/vet ./...`, golangci-lint
+  v2 **pinned** `v2.12.2`, govulncheck) and `release.yml` (GoReleaser on `v*` tags).
+  Both are tool-agnostic.
+- golangci-lint v2: suppress gosec with `//nolint:gosec // reason`; `_test.go` is
+  exempt from errcheck/gosec/funlen/goconst. mockgen output (`mock_*_test.go`) is
+  generated and skipped by lint.
+- Uses Go 1.26 features: `new(expr)`, `strings.SplitSeq`. go.mod pins `go 1.26.4`.
+- Writing `.github/workflows/*` trips a security hook that denies the first Write —
+  re-issue it.
 
 ## Conventions
-Follow the `.agents/skills/golang-*` (samber) skills: stdlib-first, minimal
-deps, early returns, errors wrapped with `%w`, table-driven tests with
-`t.Parallel()`.
+Follow the `.agents/skills/golang-*` (samber) skills: stdlib-first, minimal deps
+(`cobra`, `golang.org/x/sync`, `go.uber.org/mock`), early returns, errors wrapped
+with `%w`, table-driven tests with `t.Parallel()`. Interfaces are mocked with
+**gomock** (`go.uber.org/mock`, `//go:generate mockgen`) or httptest; the suite is
+fully offline.
